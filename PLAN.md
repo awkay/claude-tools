@@ -7,7 +7,7 @@ A small babashka-native toolset that gives an AI coding agent on-demand access t
 - **Phase 1 (foundation + validation):** done
 - **Phase 2 (production indexer + CLIs):** done
 - **Phase 3 (distribution via bbin + tests + agent help):** done
-- **Phase 4 (instruction retrieval DB):** done — see `inst-search` below.
+- **Phase 4 (instruction retrieval DB):** done — see `instructions` below.
 - **MCP server:** still deferred — separate feature, unblocked.
 - **Embeddings:** deferred — FTS5 keyword search over AI-generated descriptions is sufficient on real queries (see Phase 1 findings below)
 
@@ -15,10 +15,16 @@ A small babashka-native toolset that gives an AI coding agent on-demand access t
 
 ```bash
 # Once published:
-bbin install io.github.awkay/claude-tools
+bbin install io.github.awkay/claude-tools                  # installs code-search
 
-# This puts a single `code-search` binary on PATH (via bbin's ~/.local/share/bbin/bin).
+# bbin 0.2.x installs only the first :bbin/bin entry per call, so install
+# instructions explicitly. Run once per machine.
+bbin install io.github.awkay/claude-tools \
+     --as instructions \
+     --main-opts '["-m" "scripts.instructions.main"]'
+
 code-search --help
+instructions --help
 ```
 
 Requires `clj-kondo` and `claude` (the Claude Code CLI) on PATH; the binary's
@@ -89,10 +95,10 @@ We use `claude -p --model haiku` under the user's Claude Max subscription.
 
 The Anthropic-API-direct path (using an API key, not Max) would be ~20× faster per call (no CLI startup), at the cost of separate billing.
 
-## `inst-search` — instruction retrieval (Component 2)
+## `instructions` — instruction retrieval (Component 2)
 
 A second binary installed from the same project (`:bbin/bin` carries both
-`code-search` and `inst-search`). Indexes a tree of markdown instructions
+`code-search` and `instructions`). Indexes a tree of markdown instructions
 into `.code-intelligence/instructions.db` and answers natural-language
 queries with **grouped output**: direct matches, prereqs (1-hop), and
 companion/extends (1-hop).
@@ -108,8 +114,8 @@ Two LLM passes:
    confidence. Because the model picks from a fixed list rather than
    generating prereqs in the abstract, hallucinated edges are bounded.
 
-CLI: `inst-search [search] QUERY...`, `inst-search index DIR`,
-`inst-search show PATH`, `inst-search gaps`, `inst-search llm-help`.
+CLI: `instructions [search] QUERY...`, `instructions index DIR`,
+`instructions show PATH`, `instructions gaps`, `instructions llm-help`.
 
 DB is **project-local and checked in** so paths in the index resolve on
 every clone. See `/Users/tonykay/.claude/plans/let-s-talk-a-bit-goofy-gem.md`

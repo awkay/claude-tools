@@ -9,7 +9,7 @@
 (def ^:dynamic *db* nil)
 
 (defn- tmp-db-path []
-  (str (System/getProperty "java.io.tmpdir") "/inst-search-test-"
+  (str (System/getProperty "java.io.tmpdir") "/instructions-test-"
        (System/currentTimeMillis) "-" (rand-int 100000) ".db"))
 
 (defn- fresh-db [f]

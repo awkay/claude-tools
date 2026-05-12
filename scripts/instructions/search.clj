@@ -159,13 +159,13 @@
 (defn -search-main [& args]
   (let [[opts pos] (parse-args args)]
     (if (empty? pos)
-      (do (println "usage: inst-search [search] [--db PATH] [--limit N] [--mode or|and] [--format plain|edn|json] QUERY...")
+      (do (println "usage: instructions [search] [--db PATH] [--limit N] [--mode or|and] [--format plain|edn|json] QUERY...")
           (System/exit 1))
       (search! (str/join " " pos) opts))))
 
 (defn -show-main [& args]
   (let [[opts pos] (parse-args args)]
     (if (empty? pos)
-      (do (println "usage: inst-search show [--db PATH] [--format plain|edn|json] PATH")
+      (do (println "usage: instructions show [--db PATH] [--format plain|edn|json] PATH")
           (System/exit 1))
       (show! (first pos) opts))))

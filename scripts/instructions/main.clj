@@ -1,5 +1,5 @@
 (ns scripts.instructions.main
-  "Single entry point for the `inst-search` CLI distributed via bbin.
+  "Single entry point for the `instructions` CLI distributed via bbin.
 
    Subcommands:
      index      Build/refresh the instruction index for a directory.
@@ -12,15 +12,15 @@
 
 (defn- print-usage []
   (println (str/trim "
-inst-search — Project instruction retrieval (markdown + FTS5 + typed edges)
+instructions — Project instruction retrieval (markdown + FTS5 + typed edges)
 
 Usage:
-  inst-search [QUERY ...]                  search (default)
-  inst-search index  DIR     [opts]
-  inst-search search QUERY...[opts]
-  inst-search show   PATH    [opts]
-  inst-search gaps           [opts]
-  inst-search llm-help
+  instructions [QUERY ...]                  search (default)
+  instructions index  DIR     [opts]
+  instructions search QUERY...[opts]
+  instructions show   PATH    [opts]
+  instructions gaps           [opts]
+  instructions llm-help
 
 Common options:
   --db PATH               SQLite path (default .code-intelligence/instructions.db
@@ -35,7 +35,7 @@ Common options:
   --project-root PATH     project root for path normalization (index)
   --force                 ignore caches (index)
 
-`inst-search --help` prints this; `inst-search llm-help` prints instructions
+`instructions --help` prints this; `instructions llm-help` prints instructions
 intended for AI coding agents.")))
 
 (defn -main [& args]

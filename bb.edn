@@ -4,7 +4,7 @@
  ;; bbin install entry. Once published, `bbin install io.github.tonykay/claude-tools`
  ;; creates a `code-search` command on PATH that runs scripts.main/-main.
  :bbin/bin {code-search {:main-opts ["-m" "scripts.main"]}
-            inst-search {:main-opts ["-m" "scripts.instructions.main"]}}
+            instructions {:main-opts ["-m" "scripts.instructions.main"]}}
 
  :tasks {test     {:doc  "Run clojure.test suite"
                    :task (do (require 'clojure.test

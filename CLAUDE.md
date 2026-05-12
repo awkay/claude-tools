@@ -14,7 +14,7 @@ other.** In particular:
 
 - Both binaries are declared:
   - `code-search → scripts.main`
-  - `inst-search → scripts.instructions.main`
+  - `instructions → scripts.instructions.main`
 - The classpath `:paths` (for resource resolution, especially
   `schema/code_index.sql` and `schema/instructions.sql` via `io/resource`)
   must match.

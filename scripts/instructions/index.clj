@@ -65,29 +65,46 @@
 
 ;; -----------------------------------------------------------------------------
 ;; Pass 1
+;;
+;; CRITICAL: the go-sqlite3 pod is a single subprocess and is NOT safe for
+;; concurrent calls — under contention it SIGSEGVs. The pipeline therefore
+;; does all DB I/O SERIALLY:
+;;   1. Serial pre-pass: read stored shas, decide LLM-vs-cached per doc.
+;;   2. Parallel LLM: futures touch ONLY in-memory data, no DB.
+;;   3. Serial post-pass: upsert all rows.
 ;; -----------------------------------------------------------------------------
 
-(defn- pass1-for-doc
-  "Either reuse stored LLM fields (sha unchanged) or run pass-1. Returns a
-   map ready for upsert-doc!."
-  [db {:keys [path sha] :as doc} {:keys [model force?]}]
-  (let [stored (idb/doc-row-by-path db path)]
-    (if (and stored (= (:sha stored) sha) (not force?))
-      ;; sha unchanged → reuse stored LLM fields
-      (let [r (idb/get-doc db path)]
-        (assoc doc
-               :summary  (:summary r)
-               :explains (idb/parse-explains r)
-               :tags     (idb/parse-tags r)
-               :model    (:analyzed_by_model r)
-               :reused?  true))
-      (let [r (llm/pass1 {:model model :doc doc})]
-        (assoc doc
-               :summary  (:summary r)
-               :explains (:explains r)
-               :tags     (:tags r)
-               :model    model
-               :reused?  false)))))
+(defn- pass1-plan
+  "Serial DB read: classify each doc as :cached (reuse stored LLM fields) or
+   :needs-llm. Returns a vector of maps with :doc, :stored (when cached),
+   and :status."
+  [db docs force?]
+  (mapv (fn [{:keys [path sha] :as doc}]
+          (let [stored (when-not force? (idb/get-doc db path))]
+            (if (and stored (= (:sha stored) sha))
+              {:doc    doc
+               :status :cached
+               :stored stored}
+              {:doc doc :status :needs-llm})))
+        docs))
+
+(defn- pass1-enrich-cached [{:keys [doc stored]}]
+  (assoc doc
+         :summary  (:summary stored)
+         :explains (idb/parse-explains stored)
+         :tags     (idb/parse-tags stored)
+         :model    (:analyzed_by_model stored)
+         :reused?  true))
+
+(defn- pass1-enrich-llm [model {:keys [doc]}]
+  ;; pure: only shells out to claude -p; no DB.
+  (let [r (llm/pass1 {:model model :doc doc})]
+    (assoc doc
+           :summary  (:summary r)
+           :explains (:explains r)
+           :tags     (:tags r)
+           :model    model
+           :reused?  false)))
 
 ;; -----------------------------------------------------------------------------
 ;; Pass 2
@@ -104,35 +121,44 @@
   (sha/short-sig
    (sha/sha256 (str doc-sha "|" (str/join "," (sort candidate-shas))))))
 
-(defn- pass2-for-doc
-  "Find candidates, gate on composite sha, run pass-2 LLM if needed, replace edges."
-  [db {:keys [path sha] :as doc-with-summary}
-   {:keys [model k confidence-floor force?]
-    :or   {k                default-candidate-k
-           confidence-floor default-confidence-floor}}]
-  (let [qtext       (candidate-query-text doc-with-summary)
-        cands-raw   (idb/fts-candidates db path qtext k)
-        cands       (for [c cands-raw]
-                      {:path     (:path c)
-                       :title    (:title c)
-                       :summary  (:summary c)
-                       :explains (idb/parse-explains c)
-                       :sha      (:sha c)})
-        cand-paths  (mapv :path cands)
-        comp-sha    (candidates-composite-sha sha (map :sha cands))
-        stored-comp (some-> (idb/doc-row-by-path db path) :candidates_sha)
-        skip?       (and (not force?) (= stored-comp comp-sha) stored-comp)]
-    (if (or skip? (empty? cands))
-      (do
-        (when (empty? cands)
-          (idb/replace-edges! db path []))
-        (idb/set-candidates-sha! db path comp-sha)
-        {:path path :skipped? true})
-      (let [result (llm/pass2 {:model model :doc doc-with-summary :candidates cands})
-            edges  (llm/edges-from-pass2 result cand-paths {:confidence-floor confidence-floor})]
-        (idb/replace-edges! db path edges)
-        (idb/set-candidates-sha! db path comp-sha)
-        {:path path :edges (count edges) :skipped? false}))))
+(defn- pass2-plan
+  "Serial DB pre-pass for pass 2. For each doc, FTS-narrow candidates and
+   decide whether the LLM needs to run. Returns a vector of maps with all
+   the data needed for the (DB-free) parallel LLM step."
+  [db p1-results k force?]
+  (mapv (fn [{:keys [path sha] :as doc-with-summary}]
+          (let [qtext     (candidate-query-text doc-with-summary)
+                cands-raw (idb/fts-candidates db path qtext k)
+                cands     (mapv (fn [c]
+                                  {:path     (:path c)
+                                   :title    (:title c)
+                                   :summary  (:summary c)
+                                   :explains (idb/parse-explains c)
+                                   :sha      (:sha c)})
+                                cands-raw)
+                comp-sha  (candidates-composite-sha sha (map :sha cands))
+                stored-cs (some-> (idb/doc-row-by-path db path) :candidates_sha)
+                skip?     (and (not force?)
+                               stored-cs
+                               (= stored-cs comp-sha))]
+            {:doc        doc-with-summary
+             :path       path
+             :candidates cands
+             :comp-sha   comp-sha
+             :status     (cond
+                           skip?           :cached
+                           (empty? cands)  :no-candidates
+                           :else           :needs-llm)}))
+        p1-results))
+
+(defn- pass2-enrich-llm
+  "Pure (no DB) — runs the LLM on one plan entry whose status is :needs-llm."
+  [model confidence-floor {:keys [doc candidates] :as entry}]
+  (let [cand-paths (mapv :path candidates)
+        result     (llm/pass2 {:model model :doc doc :candidates candidates})
+        edges      (llm/edges-from-pass2 result cand-paths
+                                         {:confidence-floor confidence-floor})]
+    (assoc entry :edges edges)))
 
 ;; -----------------------------------------------------------------------------
 ;; Orchestration
@@ -169,29 +195,49 @@
         _         (println (format "Found %d markdown files under %s" (count files) dir))
         docs      (mapv (partial read-doc project-root) files)
         root-rel  (project-relative project-root (io/file dir))
+
         ;; ---------- Pass 1 ----------
-        _         (println "Pass 1: per-doc summary/explains/tags …")
-        p1-results (parallel-map parallel
-                                 (fn [d] (pass1-for-doc db d {:model model :force? force?}))
-                                 docs)
-        ;; Serial DB write (pod is single-threaded)
-        _         (doseq [d p1-results]
-                    (idb/upsert-doc! db (assoc d :root-dir root-rel)
-                                     :force? force?))
-        reused    (count (filter :reused? p1-results))
-        analyzed  (- (count p1-results) reused)
-        _         (println (format "Pass 1 done: %d analyzed, %d cached" analyzed reused))
+        _          (println "Pass 1: per-doc summary/explains/tags …")
+        ;; (1) Serial pre-pass: classify each doc as :cached or :needs-llm.
+        plan1      (pass1-plan db docs force?)
+        cached1    (filterv #(= :cached (:status %))    plan1)
+        needs1     (filterv #(= :needs-llm (:status %)) plan1)
+        _          (println (format "  %d cached, %d to analyze" (count cached1) (count needs1)))
+        ;; (2) Parallel LLM (no DB access in futures).
+        llm1       (parallel-map parallel (partial pass1-enrich-llm model) needs1)
+        cached-out (mapv pass1-enrich-cached cached1)
+        p1-results (vec (concat cached-out llm1))
+        ;; (3) Serial DB upsert.
+        _          (doseq [d p1-results]
+                     (idb/upsert-doc! db (assoc d :root-dir root-rel) :force? force?))
+        analyzed   (count llm1)
+        reused     (count cached-out)
+        _          (println (format "Pass 1 done: %d analyzed, %d cached" analyzed reused))
+
         ;; ---------- Pass 2 ----------
-        _         (println "Pass 2: typed-edge matching (FTS-narrowed) …")
-        p2-results (parallel-map parallel
-                                 (fn [d] (pass2-for-doc db d
-                                                        {:model model :k k
-                                                         :confidence-floor confidence-floor
-                                                         :force? force?}))
-                                 p1-results)
-        skipped    (count (filter :skipped? p2-results))
-        edged      (- (count p2-results) skipped)
-        total-edges (->> p2-results (keep :edges) (reduce + 0))]
+        _           (println "Pass 2: typed-edge matching (FTS-narrowed) …")
+        ;; (1) Serial pre-pass: FTS-narrow candidates, decide LLM-vs-skip.
+        plan2       (pass2-plan db p1-results k force?)
+        needs2      (filterv #(= :needs-llm (:status %)) plan2)
+        nocands2    (filterv #(= :no-candidates (:status %)) plan2)
+        cached2     (filterv #(= :cached (:status %)) plan2)
+        _           (println (format "  %d cached, %d no-candidates, %d to analyze"
+                                     (count cached2) (count nocands2) (count needs2)))
+        ;; (2) Parallel LLM (no DB access).
+        llm2        (parallel-map parallel
+                                  (partial pass2-enrich-llm model confidence-floor)
+                                  needs2)
+        ;; (3) Serial DB write: edges + composite shas.
+        _           (doseq [{:keys [path edges comp-sha]} llm2]
+                      (idb/replace-edges! db path edges)
+                      (idb/set-candidates-sha! db path comp-sha))
+        _           (doseq [{:keys [path comp-sha]} nocands2]
+                      (idb/replace-edges! db path [])
+                      (idb/set-candidates-sha! db path comp-sha))
+        ;; cached2 entries already have correct edges + comp-sha stored
+        edged       (count llm2)
+        skipped     (+ (count cached2) (count nocands2))
+        total-edges (->> llm2 (mapcat :edges) count)]
     (println (format "Pass 2 done: %d analyzed, %d cached, %d edges written"
                      edged skipped total-edges))
     {:files (count files)
@@ -218,7 +264,7 @@
 (defn -main [& args]
   (let [[opts pos] (parse-args args)]
     (if (empty? pos)
-      (do (println "usage: inst-search index [--db PATH] [--model NAME] [--parallel N]")
+      (do (println "usage: instructions index [--db PATH] [--model NAME] [--parallel N]")
           (println "                        [--k N] [--confidence-floor F]")
           (println "                        [--project-root PATH] [--force] DIR")
           (System/exit 1))

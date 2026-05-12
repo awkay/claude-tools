@@ -12,10 +12,26 @@ Everything lives in a single SQLite + FTS5 database in the project root.
 
 ## Install
 
+This repo ships **two** binaries — `code-search` (per-function code index)
+and `instructions` (project-instruction index). bbin 0.2.x only installs the
+first `:bbin/bin` entry per `bbin install` call, so installing both takes
+two commands:
+
 ```bash
-bbin install io.github.awkay/claude-tools   # once published
-code-search doctor                            # checks clj-kondo, claude, bb
+# 1. code-search (default entry)
+bbin install io.github.awkay/claude-tools
+
+# 2. instructions (must be installed explicitly because bbin installs one
+#    binary per call). Run this once per machine.
+bbin install io.github.awkay/claude-tools \
+     --as instructions \
+     --main-opts '["-m" "scripts.instructions.main"]'
+
+code-search doctor    # checks clj-kondo, claude, bb
 ```
+
+If you only want one, install just the one you need. After installing
+`code-search`, its `--help` reminds you of the `instructions` install line.
 
 Prerequisites (auto-detected by `doctor`):
 
