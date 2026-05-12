@@ -1,0 +1,8 @@
+;; Manifest for tools.deps-based installers (notably `bbin install io.github.awkay/claude-tools`).
+;;
+;; Day-to-day development happens via `bb` and bb.edn — this file only exists
+;; so that the git-coordinate resolution path bbin uses can find a manifest.
+{:paths ["."]
+
+ ;; bbin reads :bbin/bin here when installing as a git lib.
+ :bbin/bin {code-search {:main-opts ["-m" "scripts.main"]}}}
