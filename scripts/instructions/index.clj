@@ -172,6 +172,23 @@
        (mapcat (fn [batch] (->> batch (mapv #(future (f %))) (mapv deref))))
        vec))
 
+(defn- with-progress
+  "Wrap a per-item fn so it prints `[phase i/total] path` as each item completes.
+   Counter is thread-safe; total is captured up front."
+  [phase total f path-fn]
+  (let [done  (atom 0)
+        width (count (str total))]
+    (fn [item]
+      (let [r (f item)
+            n (swap! done inc)]
+        (locking done
+          (println (format "  [%s %s/%d] %s"
+                           phase
+                           (format (str "%" width "d") n)
+                           total
+                           (path-fn item))))
+        r))))
+
 (defn index!
   "Build/refresh the instruction index.
 
@@ -204,7 +221,11 @@
         needs1     (filterv #(= :needs-llm (:status %)) plan1)
         _          (println (format "  %d cached, %d to analyze" (count cached1) (count needs1)))
         ;; (2) Parallel LLM (no DB access in futures).
-        llm1       (parallel-map parallel (partial pass1-enrich-llm model) needs1)
+        llm1       (parallel-map parallel
+                                 (with-progress "p1" (count needs1)
+                                   (partial pass1-enrich-llm model)
+                                   #(get-in % [:doc :path]))
+                                 needs1)
         cached-out (mapv pass1-enrich-cached cached1)
         p1-results (vec (concat cached-out llm1))
         ;; (3) Serial DB upsert.
@@ -225,7 +246,9 @@
                                      (count cached2) (count nocands2) (count needs2)))
         ;; (2) Parallel LLM (no DB access).
         llm2        (parallel-map parallel
-                                  (partial pass2-enrich-llm model confidence-floor)
+                                  (with-progress "p2" (count needs2)
+                                    (partial pass2-enrich-llm model confidence-floor)
+                                    :path)
                                   needs2)
         ;; (3) Serial DB write: edges + composite shas.
         _           (doseq [{:keys [path edges comp-sha]} llm2]
