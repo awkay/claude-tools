@@ -3,27 +3,20 @@
 
  ;; bbin install entry. Once published, `bbin install io.github.tonykay/claude-tools`
  ;; creates a `code-search` command on PATH that runs scripts.main/-main.
- :bbin/bin {code-search {:main-opts ["-m" "scripts.main"]}
-            instructions {:main-opts ["-m" "scripts.instructions.main"]}}
+ :bbin/bin {code-search {:main-opts ["-m" "scripts.main"]}}
 
  :tasks {test     {:doc  "Run clojure.test suite"
                    :task (do (require 'clojure.test
                                       'scripts.lib.sha-test
                                       'scripts.lib.analysis-test
                                       'scripts.lib.kondo-test
-                                      'scripts.lib.db-test
-                                      'scripts.instructions.prompts-test
-                                      'scripts.instructions.index-test
-                                      'scripts.instructions.search-test)
+                                      'scripts.lib.db-test)
                              (let [run-tests (resolve 'clojure.test/run-tests)
                                    {:keys [fail error]}
                                    (run-tests 'scripts.lib.sha-test
                                               'scripts.lib.analysis-test
                                               'scripts.lib.kondo-test
-                                              'scripts.lib.db-test
-                                              'scripts.instructions.prompts-test
-                                              'scripts.instructions.index-test
-                                              'scripts.instructions.search-test)]
+                                              'scripts.lib.db-test)]
                                (System/exit (if (zero? (+ fail error)) 0 1))))}
          nrepl    {:doc  "Start a babashka nREPL server on :1667"
                    :task (do (require 'babashka.nrepl.server)
@@ -57,21 +50,4 @@
                                 (println "FTS rebuilt"))}
          validate  {:doc  "Phase 1 end-to-end validation against ../simplymeet"
                     :task (do (require 'scripts.validate)
-                              ((resolve 'scripts.validate/-main)))}
-
-         ;; inst-search dev tasks
-         inst-index  {:doc  "bb inst-index DIR — build/refresh the instruction index"
-                      :task (do (require 'scripts.instructions.main)
-                                (apply (resolve 'scripts.instructions.main/-main) "index" *command-line-args*))}
-         inst-search {:doc  "bb inst-search QUERY... — search the instruction index"
-                      :task (do (require 'scripts.instructions.main)
-                                (apply (resolve 'scripts.instructions.main/-main) "search" *command-line-args*))}
-         inst-show   {:doc  "bb inst-show PATH — show one doc record"
-                      :task (do (require 'scripts.instructions.main)
-                                (apply (resolve 'scripts.instructions.main/-main) "show" *command-line-args*))}
-         inst-gaps   {:doc  "bb inst-gaps — list orphan/foundation docs"
-                      :task (do (require 'scripts.instructions.main)
-                                ((resolve 'scripts.instructions.main/-main) "gaps"))}
-         inst-help   {:doc  "bb inst-help — print CLAUDE.md instructions for AI agents"
-                      :task (do (require 'scripts.instructions.main)
-                                ((resolve 'scripts.instructions.main/-main) "llm-help"))}}}
+                              ((resolve 'scripts.validate/-main)))}}}

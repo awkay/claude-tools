@@ -69,8 +69,7 @@
 
 (defn open-with-schema
   "Open (or create) a SQLite db at `path`, enable WAL, and apply the schema
-   loaded from `schema-resource` iff `probe-table` is absent. Generic — used
-   for both the code index and the instructions index."
+   loaded from `schema-resource` iff `probe-table` is absent."
   [path probe-table schema-resource]
   (io/make-parents path)
   (sqlite/execute! path ["PRAGMA journal_mode=WAL;"])

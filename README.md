@@ -12,26 +12,10 @@ Everything lives in a single SQLite + FTS5 database in the project root.
 
 ## Install
 
-This repo ships **two** binaries — `code-search` (per-function code index)
-and `instructions` (project-instruction index). bbin 0.2.x only installs the
-first `:bbin/bin` entry per `bbin install` call, so installing both takes
-two commands:
-
 ```bash
-# 1. code-search (default entry)
 bbin install io.github.awkay/claude-tools
-
-# 2. instructions (must be installed explicitly because bbin installs one
-#    binary per call). Run this once per machine.
-bbin install io.github.awkay/claude-tools \
-     --as instructions \
-     --main-opts '["-m" "scripts.instructions.main"]'
-
 code-search doctor    # checks clj-kondo, claude, bb
 ```
-
-If you only want one, install just the one you need. After installing
-`code-search`, its `--help` reminds you of the `instructions` install line.
 
 Prerequisites (auto-detected by `doctor`):
 
@@ -176,4 +160,4 @@ bb rebuild-fts     # drop & recreate functions_fts (pick up tokenizer changes)
 See `PLAN.md` for the design rationale, Phase 1 validation findings (FTS5
 sufficiency, model comparison against qwen-coder), engineering notes
 (SQLite pod concurrency, CLJC merge, prompt shape), and what's deliberately
-deferred (instruction retrieval DB, MCP server, embeddings).
+deferred (MCP server, embeddings).

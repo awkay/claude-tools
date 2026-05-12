@@ -15,20 +15,7 @@
      code-search show com.acme.util/format-date
      code-search llm-help >> CLAUDE.md"
   (:require
-   [babashka.fs :as fs]
    [clojure.string :as str]))
-
-(def ^:private instructions-hint
-  (str "Companion tool: `instructions` (project-instruction index, separate binary).\n"
-       "bbin 0.2.x installs only one :bbin/bin entry per call, so if you want it\n"
-       "alongside code-search, install it explicitly:\n"
-       "\n"
-       "  bbin install io.github.awkay/claude-tools \\\n"
-       "       --as instructions \\\n"
-       "       --main-opts '[\"-m\" \"scripts.instructions.main\"]'\n"))
-
-(defn- instructions-installed? []
-  (boolean (fs/which "instructions")))
 
 (defn- print-usage []
   (println (str/trim "
@@ -53,10 +40,7 @@ Common options:
   --force            ignore caches (index)
 
 `code-search --help` prints this; `code-search llm-help` prints instructions
-intended for AI coding agents."))
-  (when-not (instructions-installed?)
-    (println)
-    (println instructions-hint)))
+intended for AI coding agents.")))
 
 (defn -main [& args]
   (let [[sub & rst] args]

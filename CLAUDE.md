@@ -12,12 +12,9 @@ This repo ships two manifest files at the root:
 Both files declare `:bbin/bin` and `:paths`. **If you change one, change the
 other.** In particular:
 
-- Both binaries are declared:
-  - `code-search → scripts.main`
-  - `instructions → scripts.instructions.main`
+- The `code-search` binary is declared (`code-search → scripts.main`).
 - The classpath `:paths` (for resource resolution, especially
-  `schema/code_index.sql` and `schema/instructions.sql` via `io/resource`)
-  must match.
+  `schema/code_index.sql` via `io/resource`) must match.
 
 If you forget to update `deps.edn`, local `bb` commands still work, but
 `bbin install` from a git coordinate breaks. If you forget to update `bb.edn`,
