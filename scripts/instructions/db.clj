@@ -168,8 +168,10 @@
   ([db q {:keys [limit mode] :or {limit 10 mode :or}}]
    (if-let [q5 (query->fts5 q mode)]
      (basedb/query db
+                   ;; docs_fts columns: path, title, summary, explains, tags, body
+                   ;; Weight title/summary/explains (LLM-curated capability text) over body.
                    "SELECT d.path, d.title, d.summary, d.tags_json, d.explains_json,
-                           bm25(docs_fts) AS rank
+                           bm25(docs_fts, 2.0, 10.0, 6.0, 6.0, 3.0, 1.0) AS rank
                       FROM docs_fts
                       JOIN docs d ON d.id = docs_fts.rowid
                       WHERE docs_fts MATCH ?
