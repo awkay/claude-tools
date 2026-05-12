@@ -35,6 +35,17 @@
     {:result (claude-cli/analyze-fn {:model model :fn-record fn-rec})
      :ms     (- (System/currentTimeMillis) t0)}))
 
+(defn- run-batch
+  "One LLM call per file. Returns {:results {qname -> result-map} :ms long}."
+  [{:keys [model]} filename fn-records]
+  (let [t0     (System/currentTimeMillis)
+        src    (try (slurp filename) (catch Exception _ ""))
+        results (claude-cli/analyze-file {:model model
+                                          :file-source src
+                                          :fn-records fn-records})]
+    {:results results
+     :ms      (- (System/currentTimeMillis) t0)}))
+
 (defn- store!
   [db {:keys [model]}
    fn-rec
@@ -74,31 +85,55 @@
 (defn- fn-already-indexed? [db {:keys [qualified-name lang sha]}]
   (= sha (:sha (db/fn-row-by-qname db qualified-name lang))))
 
+(defn- pre-delete-orphans!
+  "For each filename in `fn-records`, remove DB rows whose (qname,lang) is
+   no longer in the current kondo output. Returns total rows deleted."
+  [db fn-records]
+  (let [by-file (group-by :filename fn-records)]
+    (reduce
+     (fn [n [filename recs]]
+       (let [keep-set (->> recs
+                           (map (juxt :qualified-name :lang))
+                           (set))
+             deleted  (db/delete-orphans-in-file! db filename keep-set)]
+         (when (pos? deleted)
+           (binding [*out* *err*]
+             (println (format "  [PRUNE] %s: removed %d stale fn(s)" filename deleted))))
+         (+ n deleted)))
+     0
+     by-file)))
+
 (defn run-pipeline
-  "Three-phase: serial cache-check → parallel analyze → serial DB writes.
+  "Per-file batch pipeline: pre-delete orphans → group by file → one LLM call
+   per file (parallel across files) → serial DB writes.
    Returns a seq of {:qname :ms :source}."
   [db opts fn-records]
+  (pre-delete-orphans! db fn-records)
   (let [{cached true to-do false} (group-by #(fn-already-indexed? db %) fn-records)
         _ (binding [*out* *err*]
             (doseq [fn-rec cached]
               (println (format "  [SKIP] %s (sha cached)" (:qualified-name fn-rec)))))
-        analyzed
+        by-file  (group-by :filename to-do)
+        batches
         (parallel-map
          (:parallel opts)
-         (fn [fn-rec]
-           (let [{:keys [result ms]} (run-once opts fn-rec)]
+         (fn [[filename recs]]
+           (let [{:keys [results ms]} (run-batch opts filename recs)]
              (binding [*out* *err*]
-               (println (format "  [LLM] %-58s %4d ms"
-                                (:qualified-name fn-rec) ms)))
-             {:fn-rec fn-rec :result result :ms ms}))
-         to-do)]
-    (doseq [{:keys [fn-rec result]} analyzed]
-      (store! db opts fn-rec result))
+               (println (format "  [LLM] %-58s %4d ms (%d fn)"
+                                filename ms (count recs))))
+             {:filename filename :recs recs :results results :ms ms}))
+         by-file)]
+    (doseq [{:keys [recs results]} batches
+            fn-rec recs]
+      (store! db opts fn-rec (get results (:qualified-name fn-rec))))
     (concat
      (for [fn-rec cached]
        {:qname (:qualified-name fn-rec) :ms 0 :source :cached})
-     (for [{:keys [fn-rec ms]} analyzed]
-       {:qname (:qualified-name fn-rec) :ms ms :source :llm}))))
+     (for [{:keys [recs ms]} batches
+           fn-rec recs]
+       ;; amortize batch ms across its fns for percentile reporting
+       {:qname (:qualified-name fn-rec) :ms (quot ms (max 1 (count recs))) :source :llm}))))
 
 ;; -----------------------------------------------------------------------------
 ;; File-SHA gating

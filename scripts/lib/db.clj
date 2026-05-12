@@ -145,6 +145,24 @@
 (defn fn-row-by-qname [db qname lang]
   (first (query db "SELECT id, sha FROM functions WHERE qualified_name = ? AND lang = ?" qname lang)))
 
+(defn qnames-in-file
+  "Return seq of {:qualified_name :lang} for every row stored under `filename`."
+  [db filename]
+  (query db "SELECT qualified_name, lang FROM functions WHERE filename = ?" filename))
+
+(defn delete-orphans-in-file!
+  "Delete rows for `filename` whose [qualified-name lang] is not in `keep-set`
+   (a set of [qname-string lang-string]). Returns count deleted."
+  [db filename keep-set]
+  (let [existing (qnames-in-file db filename)
+        to-del   (remove (fn [{:keys [qualified_name lang]}]
+                           (keep-set [qualified_name lang]))
+                         existing)]
+    (doseq [{:keys [qualified_name lang]} to-del]
+      (execute! db "DELETE FROM functions WHERE qualified_name = ? AND lang = ?"
+                qualified_name lang))
+    (count to-del)))
+
 (defn update-positions!
   "When a file changed but the function's body didn't (SHA stable), refresh
    only the line/col positions — no LLM call."

@@ -4,6 +4,7 @@
   (:require
    [babashka.process :as p]
    [cheshire.core :as json]
+   [clojure.edn :as edn]
    [clojure.string :as str]))
 
 (def default-model "haiku")
@@ -94,3 +95,108 @@
          :domain_signals        []
          :general_purpose_score 0.0
          :confidence            0.0})))
+
+;; -----------------------------------------------------------------------------
+;; Batch analysis: one Haiku call per file, EDN output keyed by qualified-name.
+;; -----------------------------------------------------------------------------
+
+(def ^:private batch-system-prompt
+  "You are a Clojure code analyst. Given the full source of a file and a list of functions to summarize, return ONE EDN map keyed by qualified-name string. No prose, no markdown fences — EDN only.")
+
+(defn- format-fn-spec [{:keys [ns name qualified-name arglists-edn arities private?
+                               pure-heuristic? pure-heuristic-reasons types-edn]}]
+  (str "- " qualified-name (when private? " (private)")
+       "  arglists=" (or arglists-edn (str "(" arities ")"))
+       (when types-edn (str "  guardrails=" types-edn))
+       (str "  purity=" (if pure-heuristic? "pure" "side-effecting"))
+       (when (seq pure-heuristic-reasons)
+         (str " [" (str/join "," pure-heuristic-reasons) "]"))))
+
+(defn- build-batch-prompt [file-source fn-records]
+  (str
+   batch-system-prompt "\n\n"
+   "File source:\n```clojure\n" file-source "\n```\n\n"
+   "Analyze these functions (defined in the file above):\n"
+   (str/join "\n" (map format-fn-spec fn-records))
+   "\n\n"
+   "Return ONE EDN map. Top-level keys are qualified-name STRINGS (e.g. \"my.ns/foo\"). "
+   "Each value is a map with EXACTLY these keys (use these exact keywords):\n"
+   "  :description            <one sentence: what it does and what it returns>\n"
+   "  :arg_descriptions       [{:name \"<arg>\" :desc \"<brief>\"} ...]\n"
+   "  :return_description     <kind of value + meaning>\n"
+   "  :tags                   [<2-6 lowercase keyword-like strings>]\n"
+   "  :domain_signals         [<project-specific terms>]\n"
+   "  :general_purpose_score  <0..1 number>\n"
+   "  :confidence             <0..1 number>\n"
+   "Include an entry for EVERY function listed above. EDN ONLY. No markdown fences. No commentary."))
+
+(defn- strip-edn-fences [s]
+  (let [s (str/trim s)
+        s (str/replace s #"(?s)\A```(?:edn|clojure)?\s*" "")
+        s (str/replace s #"(?s)\s*```\s*\z" "")]
+    (str/trim s)))
+
+(defn- extract-edn-map [s]
+  (let [try-parse (fn [x] (try (let [r (edn/read-string x)]
+                                 (when (map? r) r))
+                               (catch Exception _ nil)))]
+    (or (try-parse s)
+        (try-parse (strip-edn-fences s))
+        (when-let [start (str/index-of s "{")]
+          (try-parse (subs s start))))))
+
+(defn- run-claude-json
+  "Run `claude -p` with JSON output. Returns {:text result-text :session-id sid}
+   or nil on failure."
+  [model prompt & {:keys [resume-id]}]
+  (let [argv (cond-> ["claude" "-p"
+                      "--model" model
+                      "--no-session-persistence"
+                      "--output-format" "json"]
+               resume-id (into ["--resume" resume-id])
+               true      (conj prompt))
+        {:keys [out exit]} (p/sh argv {:out :string :err :string :timeout 600000})]
+    (when (zero? exit)
+      (try (let [j (json/parse-string out true)]
+             {:text (:result j) :session-id (:session_id j)})
+           (catch Exception _ nil)))))
+
+(defn- build-resume-prompt [missing-qnames]
+  (str "You missed some functions in your previous EDN response. "
+       "Return ONE EDN map keyed by qualified-name STRING containing entries for ONLY these: "
+       (pr-str (vec missing-qnames))
+       "\nSame value shape as before (:description, :arg_descriptions, :return_description, "
+       ":tags, :domain_signals, :general_purpose_score, :confidence). "
+       "EDN ONLY. No markdown fences. No commentary."))
+
+(defn analyze-file
+  "Batch-analyze every fn-record in `fn-records` (all from the same file).
+   `file-source` is the full text of that file. Returns a map of
+   qualified-name -> result map (snake_case keys, same shape as analyze-fn).
+
+   Strategy: one batched call; if any names are missing from the response,
+   resume the session and ask for just the missing ones. Stragglers after
+   resume get a confidence=0 stub."
+  [{:keys [model file-source fn-records] :or {model default-model}}]
+  (let [prompt   (build-batch-prompt file-source fn-records)
+        wanted   (set (map :qualified-name fn-records))
+        stub     {:description           "<analysis failed>"
+                  :arg_descriptions      []
+                  :return_description    ""
+                  :tags                  []
+                  :domain_signals        []
+                  :general_purpose_score 0.0
+                  :confidence            0.0}
+        first-rsp (run-claude-json model prompt)
+        parsed1   (or (some-> first-rsp :text extract-edn-map) {})
+        missing   (vec (remove parsed1 wanted))
+        parsed2   (if (and (seq missing) (:session-id first-rsp))
+                    (let [resumed (run-claude-json model
+                                                   (build-resume-prompt missing)
+                                                   :resume-id (:session-id first-rsp))]
+                      (or (some-> resumed :text extract-edn-map) {}))
+                    {})
+        merged    (merge parsed1 parsed2)]
+    (into {}
+          (for [qname wanted]
+            [qname (or (get merged qname) stub)]))))
