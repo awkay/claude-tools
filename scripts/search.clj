@@ -40,7 +40,7 @@
    "  --ns-exclude LIST   Comma-separated substrings. HARD EXCLUDE: drop rows\n"
    "                      whose namespace contains any listed substring.\n"
    "  --ns-boost LIST     Comma-separated substrings. SOFT BOOST: rows whose ns\n"
-   "                      contains any listed substring rank higher (-2.0 to score).\n"
+   "                      contains any listed substring rank higher (-10.0 to score).\n"
    "                      Default when neither --ns-filter nor --ns-boost supplied: \"lib,core\".\n"
    "  --no-caller-boost   Disable the caller_count ranking term.\n"
    "  -v, --verbose       Verbose per-result output (file, gp, conf, tags, score).\n"
@@ -75,7 +75,7 @@
    "     :caller-boost? true}\n"
    "\n"
    "Ranking:\n"
-   "  score = bm25 + ns_boost(-2.0 on match) - 3 * ln(1 + caller_count)\n"
+   "  score = bm25 + ns_boost(-10.0 on match) - ln(1 + caller_count)\n"
    "  Lower score = better match.\n"))
 
 (defn- parse-json [s] (when s (try (json/parse-string s true) (catch Exception _ nil))))
