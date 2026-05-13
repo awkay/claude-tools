@@ -282,16 +282,19 @@
      :mode          :or | :and (default :or)
      :ns-filter     seq of substrings; hard-filter rows whose ns contains ANY (case-insens)
      :ns-exclude    seq of substrings; drop rows whose ns contains ANY (case-insens)
-     :ns-boost      seq of substrings; soft boost (-10.0) on match. Defaults to [\"lib\" \"core\"]
+     :ns-boost      seq of substrings; soft rank boost on match.
+     :boost-amount  positive magnitude of the ns boost (default 10.0). Internally
+                    applied as a negative offset to the score. Defaults to [\"lib\" \"core\"]
                     when neither :ns-filter nor :ns-boost is supplied (caller passes :default? true
                     to request that default). If :ns-filter is supplied and :ns-boost is empty,
                     no ns boost is applied.
      :caller-boost? when true (default), subtract ln(1+caller_count) from score."
   ([db q] (fts-search db q {}))
-  ([db q {:keys [limit mode ns-filter ns-exclude ns-boost caller-boost?]
-          :or {limit 10 mode :or caller-boost? true}}]
+  ([db q {:keys [limit mode ns-filter ns-exclude ns-boost caller-boost? boost-amount]
+          :or {limit 10 mode :or caller-boost? true boost-amount 10.0}}]
    (if-let [q5 (query->fts5 q mode)]
-     (let [[filter-frag  filter-params]  (like-clause ns-filter)
+     (let [boost-mag (Math/abs (double boost-amount))
+           [filter-frag  filter-params]  (like-clause ns-filter)
            [exclude-frag exclude-params] (like-clause ns-exclude "NOT LIKE")
            where (str "WHERE functions_fts MATCH ?"
                       (when filter-frag  (str " AND " filter-frag))
@@ -312,7 +315,7 @@
                                (or exclude-params [])
                                [pool-size]))
            score (fn [{:keys [rank ns caller_count]}]
-                   (let [boost (if (ns-matches-any? ns ns-boost) -10.0 0.0)
+                   (let [boost (if (ns-matches-any? ns ns-boost) (- boost-mag) 0.0)
                          clog  (if caller-boost?
                                  (- (Math/log (+ 1.0 (double (or caller_count 0)))))
                                  0.0)]

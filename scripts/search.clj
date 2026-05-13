@@ -40,8 +40,9 @@
    "  --ns-exclude LIST   Comma-separated substrings. HARD EXCLUDE: drop rows\n"
    "                      whose namespace contains any listed substring.\n"
    "  --ns-boost LIST     Comma-separated substrings. SOFT BOOST: rows whose ns\n"
-   "                      contains any listed substring rank higher (-10.0 to score).\n"
+   "                      contains any listed substring rank higher.\n"
    "                      Default when neither --ns-filter nor --ns-boost supplied: \"lib,core\".\n"
+   "  --boost-amount N    Magnitude of the ns boost (positive number, default 10.0).\n"
    "  --no-caller-boost   Disable the caller_count ranking term.\n"
    "  -v, --verbose       Verbose per-result output (file, gp, conf, tags, score).\n"
    "                      Default: two-line compact (qualified-name + description).\n"
@@ -66,6 +67,7 @@
    "    :ns-filter      [\"sub\" ...] — hard include filter\n"
    "    :ns-exclude     [\"sub\" ...] — hard exclude filter\n"
    "    :ns-boost       [\"sub\" ...] — soft rank boost (overrides built-in [\"lib\" \"core\"])\n"
+   "    :boost-amount   number      — magnitude of the ns boost (default 10.0)\n"
    "    :caller-boost?  true|false  — enable/disable the log(1+caller_count) term\n"
    "\n"
    "  Example .code-search.edn:\n"
@@ -75,7 +77,7 @@
    "     :caller-boost? true}\n"
    "\n"
    "Ranking:\n"
-   "  score = bm25 + ns_boost(-10.0 on match) - ln(1 + caller_count)\n"
+   "  score = bm25 + ns_boost(-:boost-amount on match) - ln(1 + caller_count)\n"
    "  Lower score = better match.\n"))
 
 (defn- parse-json [s] (when s (try (json/parse-string s true) (catch Exception _ nil))))
@@ -173,18 +175,20 @@
 
 (defn search!
   ([query] (search! query {}))
-  ([query {:keys [db limit mode format ns-filter ns-exclude ns-boost caller-boost? verbose?]
+  ([query {:keys [db limit mode format ns-filter ns-exclude ns-boost
+                  caller-boost? boost-amount verbose?]
            :or {db default-db-path limit 5 mode :or format :plain caller-boost? true}}]
    (let [ns-boost* (cond
                      (seq ns-boost)   ns-boost
                      (seq ns-filter)  nil          ; explicit filter replaces default boost
                      :else            default-boost-ns)
-         hits (db/fts-search db query {:limit limit
-                                       :mode mode
-                                       :ns-filter ns-filter
-                                       :ns-exclude ns-exclude
-                                       :ns-boost ns-boost*
-                                       :caller-boost? caller-boost?})
+         hits (db/fts-search db query (cond-> {:limit limit
+                                               :mode mode
+                                               :ns-filter ns-filter
+                                               :ns-exclude ns-exclude
+                                               :ns-boost ns-boost*
+                                               :caller-boost? caller-boost?}
+                                        boost-amount (assoc :boost-amount boost-amount)))
          row-fn (if verbose? format-search-row-verbose format-search-row-compact)]
      (case format
        :edn   (pp/pprint hits)
@@ -221,6 +225,7 @@
       (= a "--ns-exclude")   (recur (rest rst) (assoc opts :ns-exclude (parse-csv (first rst))) positional)
       (= a "--ns-boost")     (recur (rest rst) (assoc opts :ns-boost   (parse-csv (first rst))) positional)
       (= a "--no-caller-boost") (recur rst (assoc opts :caller-boost? false) positional)
+      (= a "--boost-amount") (recur (rest rst) (assoc opts :boost-amount (Double/parseDouble (first rst))) positional)
       (or (= a "-v") (= a "--verbose")) (recur rst (assoc opts :verbose? true) positional)
       (= a "--no-config")    (recur rst (assoc opts :no-config? true) positional)
       (or (= a "--help") (= a "-h")) (recur rst (assoc opts :help? true) positional)
