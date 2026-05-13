@@ -16,6 +16,11 @@ and to inspect a candidate's shape and call-sites.
 # Search by intent (natural language is fine).
 code-search 'validate an email address'
 
+# Use the explicit `search` subcommand when passing options — otherwise the
+# flags will be parsed as part of the query. Example: narrow to a sub-tree
+# and ask for more results.
+code-search search --ns-filter com.acme.billing --limit 20 'apply a discount'
+
 # Inspect a candidate — full function card: args, purity, description,
 # docstring, call-site examples, callers, callees.
 code-search show com.acme.util.date/->display-str
