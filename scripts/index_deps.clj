@@ -7,6 +7,8 @@
    [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [scripts.doctor :as doctor]
+   [scripts.lib.claude-cli :as claude-cli]
    [scripts.lib.db :as db]
    [scripts.lib.kondo :as kondo])
   (:import
@@ -420,6 +422,120 @@
              :indexed total :total (count all-recs)}))))))
 
 ;; -----------------------------------------------------------------------------
+;; LLM indexing (--no-fast)
+;; -----------------------------------------------------------------------------
+
+(def ^:private default-model
+  (or (System/getenv "CODE_INDEX_CLAUDE_MODEL") "haiku"))
+
+(def ^:private default-parallel 20)
+
+(defn- public-record?
+  "Public def (with or without docstring)."
+  [fn-rec]
+  (not (:private? fn-rec)))
+
+(defn- llm-store!
+  "Store one fn-rec + LLM result. Filename has already been rewritten to the
+   logical `deps/...` path."
+  [db model fn-rec
+   {:keys [description arg_descriptions return_description
+           tags domain_signals general_purpose_score confidence
+           analyzed-by-model]
+    :or   {analyzed-by-model model}}]
+  (db/upsert-function!
+   db (-> fn-rec
+          (assoc :description-llm description
+                 :arg-descriptions-llm arg_descriptions
+                 :return-description-llm return_description
+                 :tags-llm tags
+                 :domain-signals-llm domain_signals
+                 :general-purpose-score general_purpose_score
+                 :confidence confidence
+                 :analyzed-by-model analyzed-by-model
+                 :callee-namespaces (->> (:callees fn-rec)
+                                         (keep :to-ns) distinct vec))
+          (select-keys
+           [:ns :name :qualified-name :lang :sha
+            :filename :line-start :line-end :col-start :col-end
+            :arglists-edn :arities :defined-by :private? :docstring
+            :pure-heuristic? :pure-heuristic-reasons :types-edn
+            :caller-count :caller-namespaces :callee-namespaces :example-callers
+            :description-llm :arg-descriptions-llm :return-description-llm
+            :tags-llm :domain-signals-llm :general-purpose-score :confidence
+            :analyzed-by-model]))))
+
+(defn- parallel-map [n f coll]
+  (->> coll
+       (partition-all n)
+       (mapcat (fn [batch]
+                 (->> batch (mapv #(future (f %))) (mapv deref))))))
+
+(defn- index-coord-llm!
+  "Extract one coord's jar, run kondo, batch-LLM-analyze each source file, and
+   store public fns with LLM results. Filenames are rewritten to logical
+   `deps/...` paths before DB write."
+  [db {:keys [model parallel]} tmp-root {:keys [i n]} {:keys [lib version] :as coord}]
+  (let [head (format "[%d/%d] %s %s" i n lib version)
+        jar  (m2-jar-file coord)]
+    (cond
+      (not (.exists jar))
+      (do (progress! (str head " — SKIP (jar not in ~/.m2)"))
+          (progress-newline!)
+          {:lib lib :version version :status :missing})
+
+      :else
+      (let [extract-dir    (coord->extract-dir coord tmp-root)
+            temp-prefix    (str (.getCanonicalPath extract-dir) "/")
+            logical-prefix (coord->path-prefix coord)
+            _              (progress! (str head " — extracting jar…"))
+            _              (delete-recursively! extract-dir)
+            t-ex0          (System/currentTimeMillis)
+            file-count     (extract-jar! jar extract-dir)
+            t-ex           (- (System/currentTimeMillis) t-ex0)]
+        (if (zero? file-count)
+          (do (progress! (str head " — SKIP (no .clj/.cljs/.cljc in jar)"))
+              (progress-newline!)
+              {:lib lib :version version :status :no-sources})
+          (let [_        (progress! (format "%s — linting %d source file(s) (extract %d ms)…"
+                                            head file-count t-ex))
+                t-k0     (System/currentTimeMillis)
+                all-recs (kondo/analyze (.getCanonicalPath extract-dir))
+                t-k      (- (System/currentTimeMillis) t-k0)
+                pubs     (filter public-record? all-recs)
+                by-file  (group-by :filename pubs)
+                rewriter (partial rewrite-filename
+                                  {:temp-prefix    temp-prefix
+                                   :logical-prefix logical-prefix})
+                total    (count pubs)
+                done     (atom 0)
+                batches
+                (parallel-map
+                 (max 1 (or parallel default-parallel))
+                 (fn [[filename recs]]
+                   (let [t0  (System/currentTimeMillis)
+                         src (try (slurp filename) (catch Exception _ ""))
+                         res (claude-cli/analyze-file
+                              {:model       model
+                               :file-source src
+                               :fn-records  recs})
+                         ms  (- (System/currentTimeMillis) t0)]
+                     (swap! done + (count recs))
+                     (progress! (format "%s — LLM %d/%d (lint %d ms, last file %d ms)"
+                                        head @done total t-k ms))
+                     {:recs recs :results res}))
+                 by-file)]
+            (doseq [{:keys [recs results]} batches
+                    fn-rec recs]
+              (llm-store! db model (rewriter fn-rec)
+                          (get results (:qualified-name fn-rec))))
+            (progress! (format "%s — indexed %d/%d public fns via LLM (lint %d ms)"
+                               head total (count all-recs) t-k))
+            (progress-newline!)
+            {:lib lib :version version :status :ok
+             :indexed total :total (count all-recs)}))))))
+
+;; -----------------------------------------------------------------------------
 ;; CLI
 ;; -----------------------------------------------------------------------------
 
@@ -436,6 +552,8 @@
                :fast?     true
                :selectors []
                :db        default-db-path
+               :model     default-model
+               :parallel  default-parallel
                :tmp-root  default-tmp-root}
          args args]
     (if-let [[a & rst] (seq args)]
@@ -446,6 +564,8 @@
         (= a "--db")         (recur (assoc opts :db (first rst)) (next rst))
         (= a "--deps-file")  (recur (assoc opts :deps-file (first rst)) (next rst))
         (= a "--tmp-root")   (recur (assoc opts :tmp-root (first rst)) (next rst))
+        (= a "--model")      (recur (assoc opts :model (first rst)) (next rst))
+        (= a "--parallel")   (recur (assoc opts :parallel (Integer/parseInt (first rst))) (next rst))
         (or (= a "-h") (= a "--help"))
         (recur (assoc opts :help? true) rst)
         :else                (recur (update opts :selectors conj a) rst))
@@ -462,30 +582,43 @@ Usage:
   code-search index-deps --deps-file PATH        alternate deps.edn
   code-search index-deps --db PATH               SQLite path
   code-search index-deps --tmp-root DIR          temp extract root (default /tmp/claude-tools-deps)
-  code-search index-deps --no-fast               (placeholder) full LLM pipeline — not yet wired
+  code-search index-deps --no-fast               full LLM analysis (slow; uses ~/.claude CLI)
+  code-search index-deps --model NAME            LLM model (default: $CODE_INDEX_CLAUDE_MODEL or haiku)
+  code-search index-deps --parallel N            concurrent LLM file-batches (default 20)
 
 Fast mode (default):
   • No LLM calls.
   • Indexes ONLY public defs with a docstring.
   • Docstring is whitespace-collapsed and truncated to 200 chars.
-  • Jars missing from ~/.m2 are skipped with a note.")))
+  • Jars missing from ~/.m2 are skipped with a note.
 
-(defn- run-indexing! [{:keys [db tmp-root fast?]} picked]
+--no-fast mode:
+  • Indexes ALL public defs (with or without docstring).
+  • One LLM call per source file, parallelized across files.
+  • Slower and costs API tokens; output includes LLM descriptions, tags, etc.")))
+
+(defn- run-indexing! [{:keys [db tmp-root fast? model parallel] :as opts} picked]
   (when-not fast?
     (binding [*out* *err*]
-      (println "Note: --no-fast (LLM mode) for index-deps not implemented yet; running --fast.")))
+      (when-not (doctor/ensure!) (System/exit 1))))
   (let [db-conn (db/open db)
         root    (io/file tmp-root)]
     (.mkdirs root)
     (binding [*out* *err*]
-      (println (format "index-deps: db=%s tmp-root=%s fast=true" db (.getPath root))))
+      (if fast?
+        (println (format "index-deps: db=%s tmp-root=%s fast=true" db (.getPath root)))
+        (println (format "index-deps: db=%s tmp-root=%s fast=false model=%s parallel=%d"
+                         db (.getPath root) model parallel))))
     (try
       (let [n       (count picked)
             results (doall
                      (map-indexed
                       (fn [idx c]
-                        (index-coord-fast! db-conn root
-                                           {:i (inc idx) :n n} c))
+                        (if fast?
+                          (index-coord-fast! db-conn root
+                                             {:i (inc idx) :n n} c)
+                          (index-coord-llm! db-conn opts root
+                                            {:i (inc idx) :n n} c)))
                       picked))
             ok      (filter #(= :ok (:status %)) results)
             missing (filter #(= :missing (:status %)) results)
