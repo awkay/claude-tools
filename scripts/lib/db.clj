@@ -252,21 +252,74 @@
         :or  (str/join " OR " tokens)
         :and (str/join " " tokens)))))
 
+(defn- ns-matches-any?
+  "True if (lower-case ns) contains any of the substrings (also lower-cased)."
+  [ns-str substrs]
+  (when (and ns-str (seq substrs))
+    (let [lns (str/lower-case ns-str)]
+      (boolean (some #(str/includes? lns (str/lower-case %)) substrs)))))
+
+(defn- like-clause
+  "Returns [sql-fragment params] for an OR-of-LIKE filter against `ns`.
+   `op` is \"LIKE\" (inclusion) or \"NOT LIKE\" (exclusion). For NOT LIKE the
+   terms are joined with AND so all exclusions must hold.
+   Returns nil if substrs is empty."
+  ([substrs] (like-clause substrs "LIKE"))
+  ([substrs op]
+   (when (seq substrs)
+     (let [terms (mapv #(str "%" (str/lower-case %) "%") substrs)
+           joiner (if (= op "NOT LIKE") " AND " " OR ")
+           pred   (str "lower(f.ns) " op " ?")
+           frag   (str "(" (str/join joiner (repeat (count terms) pred)) ")")]
+       [frag terms]))))
+
 (defn fts-search
-  "BM25 over functions_fts. Default mode is :or so natural-language queries
-   degrade gracefully — BM25 ranks the matches regardless of how many tokens hit.
-   Use :and for strict all-tokens-required."
+  "BM25 over functions_fts with optional ns filter, ns boost, and caller_count boost.
+   Returns rows ordered by composite `score` (lower = better).
+
+   Options:
+     :limit         max rows to return (default 10)
+     :mode          :or | :and (default :or)
+     :ns-filter     seq of substrings; hard-filter rows whose ns contains ANY (case-insens)
+     :ns-exclude    seq of substrings; drop rows whose ns contains ANY (case-insens)
+     :ns-boost      seq of substrings; soft boost (-2.0) on match. Defaults to [\"lib\" \"core\"]
+                    when neither :ns-filter nor :ns-boost is supplied (caller passes :default? true
+                    to request that default). If :ns-filter is supplied and :ns-boost is empty,
+                    no ns boost is applied.
+     :caller-boost? when true (default), subtract ln(1+caller_count) from score."
   ([db q] (fts-search db q {}))
-  ([db q {:keys [limit mode] :or {limit 10 mode :or}}]
+  ([db q {:keys [limit mode ns-filter ns-exclude ns-boost caller-boost?]
+          :or {limit 10 mode :or caller-boost? true}}]
    (if-let [q5 (query->fts5 q mode)]
-     (query db
-            "SELECT f.qualified_name, f.description_llm, f.general_purpose_score, f.confidence,
-                    f.tags_llm, f.filename, f.line_start, f.line_end,
-                    bm25(functions_fts) AS rank
-               FROM functions_fts
-               JOIN functions f ON f.id = functions_fts.rowid
-               WHERE functions_fts MATCH ?
-               ORDER BY rank ASC
-               LIMIT ?"
-            q5 limit)
+     (let [[filter-frag  filter-params]  (like-clause ns-filter)
+           [exclude-frag exclude-params] (like-clause ns-exclude "NOT LIKE")
+           where (str "WHERE functions_fts MATCH ?"
+                      (when filter-frag  (str " AND " filter-frag))
+                      (when exclude-frag (str " AND " exclude-frag)))
+           ;; Fetch a wider pool so post-rerank can reorder before truncation.
+           pool-size (max (* limit 10) 200)
+           sql (str "SELECT f.qualified_name, f.description_llm, f.general_purpose_score,
+                            f.confidence, f.tags_llm, f.filename, f.line_start, f.line_end,
+                            f.ns, f.caller_count,
+                            bm25(functions_fts) AS rank
+                       FROM functions_fts
+                       JOIN functions f ON f.id = functions_fts.rowid
+                       " where "
+                       ORDER BY rank ASC
+                       LIMIT ?")
+           rows (apply query db sql q5
+                       (concat (or filter-params [])
+                               (or exclude-params [])
+                               [pool-size]))
+           score (fn [{:keys [rank ns caller_count]}]
+                   (let [boost (if (ns-matches-any? ns ns-boost) -2.0 0.0)
+                         clog  (if caller-boost?
+                                 (- (Math/log (+ 1.0 (double (or caller_count 0)))))
+                                 0.0)]
+                     (+ (double (or rank 0.0)) boost clog)))]
+       (->> rows
+            (map #(assoc % :score (score %)))
+            (sort-by :score)
+            (take limit)
+            vec))
      [])))

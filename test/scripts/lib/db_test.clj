@@ -134,3 +134,40 @@
   (testing "empty/whitespace query returns []"
     (is (= [] (db/fts-search *db* "")))
     (is (= [] (db/fts-search *db* "the a an of")))))
+
+(deftest fts-search-filter-and-boost-test
+  ;; Same description across rows so BM25 is roughly equal; ns and caller_count differ.
+  (let [base (assoc sample-record :description-llm "frobnicate the widgets"
+                    :tags-llm ["widget"])]
+    (db/upsert-function! *db* (assoc base :ns 'my.app.core
+                                     :qualified-name "my.app.core/frob-a"
+                                     :sha "h1" :caller-count 0))
+    (db/upsert-function! *db* (assoc base :ns 'my.lib.util
+                                     :qualified-name "my.lib.util/frob-b"
+                                     :sha "h2" :caller-count 0))
+    (db/upsert-function! *db* (assoc base :ns 'random.ns
+                                     :qualified-name "random.ns/frob-c"
+                                     :sha "h3" :caller-count 50)))
+
+  (testing "ns-filter hard-restricts results"
+    (let [hits (db/fts-search *db* "frobnicate widgets" {:ns-filter ["lib"]})]
+      (is (every? #(str/includes? (:ns %) "lib") hits))
+      (is (some #(= "my.lib.util/frob-b" (:qualified_name %)) hits))
+      (is (not-any? #(= "my.app.core/frob-a" (:qualified_name %)) hits))))
+
+  (testing "ns-boost ranks matching ns ahead"
+    (let [hits (db/fts-search *db* "frobnicate widgets"
+                              {:ns-boost ["lib"] :caller-boost? false})]
+      (is (= "my.lib.util/frob-b" (:qualified_name (first hits))))))
+
+  (testing "ns-exclude drops matching rows"
+    (let [hits (db/fts-search *db* "frobnicate widgets" {:ns-exclude ["lib" "random"]})]
+      (is (not-any? #(str/includes? (:ns %) "lib") hits))
+      (is (not-any? #(str/includes? (:ns %) "random") hits))
+      (is (some #(= "my.app.core/frob-a" (:qualified_name %)) hits))))
+
+  (testing "caller boost lifts high-caller_count rows"
+    (let [hits (db/fts-search *db* "frobnicate widgets"
+                              {:ns-boost [] :caller-boost? true})]
+      ;; frob-c has 50 callers vs 0 on the others — should come first.
+      (is (= "random.ns/frob-c" (:qualified_name (first hits)))))))
