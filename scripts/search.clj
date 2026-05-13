@@ -201,20 +201,51 @@
 
 (defn- semantic-rank
   "Returns a seq of {:id ... :score (dot)} for the top semantic hits, or nil
-   if semantic search is unavailable."
+   if semantic search is unavailable.
+
+   Uses the packed binary corpus (auto-built on first query after the DB
+   changes) so a 24k-row index searches in ~hundreds of ms, not tens of s.
+
+   On failure (Ollama down, pack write error, ...) logs a one-liner to
+   stderr and returns nil so the caller falls back to lexical-only — never
+   silent."
   [db model query pool-size]
-  (when (and (emb/has-embeddings? db model)
-             (emb/ollama-reachable?))
+  (cond
+    (not (emb/has-embeddings? db model))
+    (do (binding [*out* *err*]
+          (println "  [semantic] no embeddings indexed for model" (pr-str model)
+                   "— skipping (run `embed-index` to enable)"))
+        nil)
+
+    (not (emb/ollama-reachable?))
+    (do (binding [*out* *err*]
+          (println "  [semantic] Ollama not reachable — skipping semantic leg"))
+        nil)
+
+    :else
     (try
-      (let [qv     (-> (emb/embed query {:model model})
-                       emb/vec->blob-str
-                       emb/blob-str->floats)
-            corpus (emb/load-corpus db model)
-            hits   (emb/top-k qv corpus pool-size)]
+      (binding [*out* *err*] (print "  [semantic] embedding query...") (flush))
+      (let [t0   (System/currentTimeMillis)
+            qv   (-> (emb/embed query {:model model})
+                     emb/vec->blob-str
+                     emb/blob-str->floats)
+            _    (binding [*out* *err*]
+                   (println (format " %d ms" (- (System/currentTimeMillis) t0))))
+            pack (emb/load-or-build-pack! db db model)
+            t1   (System/currentTimeMillis)
+            _    (binding [*out* *err*]
+                   (print (format "  [semantic] scoring %d vectors..." (:n pack)))
+                   (flush))
+            hits (emb/top-k-pack qv pack pool-size)]
+        (binding [*out* *err*]
+          (println (format " %d ms" (- (System/currentTimeMillis) t1))))
         (mapv (fn [{:keys [function_id score]}]
                 {:id function_id :score score})
               hits))
-      (catch Exception _ nil))))
+      (catch Exception e
+        (binding [*out* *err*]
+          (println "  [semantic] failed —" (.getMessage e) "— falling back to lexical"))
+        nil))))
 
 (defn search!
   ([query] (search! query {}))

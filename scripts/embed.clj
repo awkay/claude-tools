@@ -175,6 +175,17 @@ Options:
         (when (pos? (count todo))
           (print-progress! @done (count todo) @errs
                            (- (System/currentTimeMillis) t0) true))
+        ;; Rebuild the packed binary corpus so subsequent searches are fast.
+        ;; Only worth doing if at least one row succeeded (or we rebuilt).
+        (when (or rebuild? (pos? @done))
+          (let [pp (emb/pack-path (:db opts) model)
+                t1 (System/currentTimeMillis)]
+            (binding [*out* *err*]
+              (print "  [pack] writing packed corpus..."))
+            (let [n (emb/write-pack! db model pp)]
+              (binding [*out* *err*]
+                (println (format " %d vectors, %d ms" n
+                                 (- (System/currentTimeMillis) t1)))))))
         (let [wall (- (System/currentTimeMillis) t0)]
           (println)
           (println "Done.")

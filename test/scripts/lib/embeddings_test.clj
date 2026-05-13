@@ -55,3 +55,21 @@
 (deftest content-sha-changes-with-model
   (is (not= (emb/content-sha "m1" "hello")
             (emb/content-sha "m2" "hello"))))
+
+(deftest top-k-pack-finds-closest
+  (testing "dot-product over a packed corpus ranks the most-similar vector first"
+    (let [;; three orthogonal-ish vectors, all L2-normalized
+          v1 (-> (emb/vec->blob-str [1.0 0.0 0.0]) emb/blob-str->floats)
+          v2 (-> (emb/vec->blob-str [0.0 1.0 0.0]) emb/blob-str->floats)
+          v3 (-> (emb/vec->blob-str [0.0 0.0 1.0]) emb/blob-str->floats)
+          ;; pack manually: ids [10 20 30], vecs concatenated
+          all (float-array 9)
+          _ (dotimes [i 3] (aset all i (aget v1 i)))
+          _ (dotimes [i 3] (aset all (+ 3 i) (aget v2 i)))
+          _ (dotimes [i 3] (aset all (+ 6 i) (aget v3 i)))
+          pack {:ids (long-array [10 20 30]) :vecs all :dim 3 :n 3}
+          ;; query closer to v2
+          q   (-> (emb/vec->blob-str [0.1 0.9 0.0]) emb/blob-str->floats)
+          hits (emb/top-k-pack q pack 3)]
+      (is (= 20 (:function_id (first hits))) "closest is v2")
+      (is (= [20 10 30] (mapv :function_id hits))))))
